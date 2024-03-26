@@ -1,10 +1,18 @@
-import logging
-import nuke
+# !/usr/bin/env python
+# coding=utf-8
+"""Holds widget for screenshots"""
+
+import re
 import time
+from math import ceil
+from pathlib import Path
+from typing import Tuple
+
+import nuke
 from PySide2 import QtWidgets, QtOpenGL, QtGui, QtCore
 from PySide2.QtWidgets import QApplication
-from math import ceil
-from typing import Tuple
+
+import settings
 
 
 def get_dag() -> QtOpenGL.QGLWidget:
@@ -61,49 +69,64 @@ class DagCapturePanel(QtWidgets.QDialog):
         path_layout.setMargin(0)
         container.setLayout(path_layout)
         self.path = QtWidgets.QLineEdit()
+        last_path = settings.get("path")
+        if last_path:
+            self.path.setText(last_path)
+
+        self.path.textChanged.connect(self.settings_changed)
         browse_button = QtWidgets.QPushButton("Browse")
         browse_button.clicked.connect(self.show_file_browser)
         path_layout.addWidget(self.path)
         path_layout.addWidget(browse_button)
         form_layout.addRow("File Path", container)
 
+        # Incremement
+        self.increment = QtWidgets.QCheckBox("Increment path every screenshot")
+        last_increment = settings.get("increment")
+        self.increment.setChecked(bool(last_increment))
+        form_layout.addWidget(self.increment)
+
         # Zoom
         self.zoom_level = QtWidgets.QDoubleSpinBox()
-        self.zoom_level.setValue(1.0)
+        last_zoom = settings.get("zoom")
+        self.zoom_level.setValue(float(last_zoom))
         self.zoom_level.setRange(0.01, 5)
         self.zoom_level.setSingleStep(.5)
-        self.zoom_level.valueChanged.connect(self.display_info)
+        self.zoom_level.valueChanged.connect(self.settings_changed)
         form_layout.addRow("Zoom Level", self.zoom_level)
 
         # Margins
         self.margins = QtWidgets.QSpinBox()
         self.margins.setRange(0, 1000)
-        self.margins.setValue(20)
+        last_margin = settings.get("margins")
+        self.margins.setValue(int(last_margin))
         self.margins.setSuffix("px")
         self.margins.setSingleStep(10)
-        self.margins.valueChanged.connect(self.display_info)
+        self.margins.valueChanged.connect(self.settings_changed)
         form_layout.addRow("Margins", self.margins)
 
         # Right Crop
         self.ignore_right = QtWidgets.QSpinBox()
         self.ignore_right.setRange(0, 1000)
-        self.ignore_right.setValue(200)
+        last_ignore_right = settings.get("ignore_right")
+        self.ignore_right.setValue(int(last_ignore_right))
         self.ignore_right.setSuffix("px")
         self.ignore_right.setToolTip(
             "The right side of the DAG usually contains a mini version of itself.\n"
             "This gets included in the screen capture, so it is required to crop it out. \n"
             "If you scaled it down, you can reduce this number to speed up capture slightly."
         )
-        self.ignore_right.valueChanged.connect(self.display_info)
+        self.ignore_right.valueChanged.connect(self.settings_changed)
         form_layout.addRow("Crop Right Side", self.ignore_right)
 
         # Delay
         self.delay = QtWidgets.QDoubleSpinBox()
-        self.delay.setValue(0)
+        last_delay = settings.get("delay")
+        self.delay.setValue(float(last_delay))
         self.delay.setRange(0, 1)
         self.delay.setSuffix("s")
         self.delay.setSingleStep(.1)
-        self.delay.valueChanged.connect(self.display_info)
+        self.delay.valueChanged.connect(self.settings_changed)
         self.delay.setToolTip(
             "A longer delay ensures the Nuke DAG has fully refreshed between capturing tiles.\n"
             "It makes the capture slower, but ensures a correct result.\n"
@@ -115,12 +138,15 @@ class DagCapturePanel(QtWidgets.QDialog):
         # Capture all nodes or selection
         self.capture = QtWidgets.QComboBox()
         self.capture.addItems(["All Nodes", "Selected Nodes"])
+        last_capture = settings.get("capture")
+        self.capture.setCurrentIndex(int(last_capture))
         self.capture.currentIndexChanged.connect(self.inspect_dag)
         form_layout.addRow("Nodes to Capture", self.capture)
 
         # Deselect Nodes before Capture?
         self.deselect = QtWidgets.QCheckBox("Deselect Nodes before capture")
-        self.deselect.setChecked(True)
+        last_deselect = settings.get("deselect")
+        self.deselect.setChecked(bool(last_deselect))
         form_layout.addWidget(self.deselect)
         # endregion Options
 
@@ -144,13 +170,25 @@ class DagCapturePanel(QtWidgets.QDialog):
 
         self.inspect_dag()
 
-    def display_info(self) -> None:
-        """Displays the calculated information"""
+    def settings_changed(self) -> None:
+        """On settings change save current settings and update message"""
         zoom = self.zoom_level.value()
+        margins = self.margins.value()
+        ignore_right = self.ignore_right.value()
+        delay = self.delay.value()
+
+        settings.set_("path", self.path.text())
+        settings.set_("increment", self.increment.isChecked())
+        settings.set_("zoom", zoom)
+        settings.set_("margins", margins)
+        settings.set_("ignore_right", ignore_right)
+        settings.set_("delay", delay)
+        settings.set_("capture", self.capture.currentIndex())
+        settings.set_("deselect", self.deselect.isChecked())
 
         # Check the size of the current widget, excluding the right side (because of minimap)
         capture_width = self.dag.width()
-        crop = self.ignore_right.value()
+        crop = ignore_right
         if crop >= capture_width:
             self.info.setText(
                 "Error: Crop is larger than capture area.\n"
@@ -163,13 +201,13 @@ class DagCapturePanel(QtWidgets.QDialog):
 
         # Calculate the number of tiles required to cover all
         min_x, min_y, max_x, max_y = self.dag_bbox
-        image_width = (max_x - min_x) * zoom + self.margins.value() * 2
-        image_height = (max_y - min_y) * zoom + self.margins.value() * 2
+        image_width = (max_x - min_x) * zoom + margins * 2
+        image_height = (max_y - min_y) * zoom + margins * 2
 
         horizontal_tiles = int(ceil(image_width / float(capture_width)))
         vertical_tiles = int(ceil(image_height / float(capture_height)))
         total_tiles = horizontal_tiles * vertical_tiles
-        total_time = total_tiles * self.delay.value()
+        total_time = total_tiles * delay
 
         info = "Image Size: {width}x{height}\n" \
                "Number of tiles required: {tiles} (Increase DAG size to reduce) \n" \
@@ -178,26 +216,12 @@ class DagCapturePanel(QtWidgets.QDialog):
                            time=total_time)
         self.info.setText(info)
 
-    def inspect_dag(self) -> None:
-        """Calculate the bounding box for DAG"""
-        nodes = nuke.allNodes() if self.capture.currentIndex() == 0 else nuke.selectedNodes()
-
-        # Calculate the total size of the DAG
-        min_x, min_y, max_x, max_y = [], [], [], []
-        for node in nodes:
-            min_x.append(node.xpos())
-            min_y.append(node.ypos())
-            max_x.append(node.xpos() + node.screenWidth())
-            max_y.append(node.ypos() + node.screenHeight())
-
-        self.dag_bbox = (min(min_x), min(min_y), max(max_x), max(max_y))
-        self.display_info()
-
     def show_file_browser(self) -> None:
         """Display the file browser"""
         filename, _filter = QtWidgets.QFileDialog.getSaveFileName(
             parent=self, caption='Select output file',
             filter="PNG Image (*.png)")
+
         self.path.setText(filename)
 
     def do_capture(self) -> None:
@@ -221,6 +245,21 @@ class DagCapturePanel(QtWidgets.QDialog):
         # Run thread
         self.capture_thread.start()
 
+    def inspect_dag(self) -> None:
+        """Calculate the bounding box for DAG"""
+        nodes = nuke.allNodes() if self.capture.currentIndex() == 0 else nuke.selectedNodes()
+
+        # Calculate the total size of the DAG
+        min_x, min_y, max_x, max_y = [], [], [], []
+        for node in nodes:
+            min_x.append(node.xpos())
+            min_y.append(node.ypos())
+            max_x.append(node.xpos() + node.screenWidth())
+            max_y.append(node.ypos() + node.screenHeight())
+
+        self.dag_bbox = (min(min_x), min(min_y), max(max_x), max(max_y))
+        self.settings_changed()
+
     def on_thread_finished(self) -> None:
         """Re-Select previously selected items and display a result popup"""
         # Re-Select previously selected items
@@ -238,9 +277,31 @@ class DagCapturePanel(QtWidgets.QDialog):
                 "Something went wrong with the DAG capture, please check script editor for details"
             )
 
+        if self.increment:
+            self._increment_path()
+
+    def _increment_path(self) -> None:
+        """Increment frame in path"""
+        original_path = Path(self.path.text())
+        parent = original_path.parent
+        original_filename = original_path.stem
+        match = re.match(".*(?P<frame>\d{4}).*", original_filename)
+        already_has_frames = match and match.group("frame")
+        if already_has_frames:
+            ext = original_path.suffix
+            modified = original_filename.replace("." + match.group("frame"), "")
+            new_path = parent / (
+                        modified + "." + str(int(match.group("frame")) + 1).zfill(4) + ext)
+            self.path.setText(new_path.as_posix())
+        else:
+            ext = original_path.suffix
+            new_path = parent / (original_filename + "." + "1".zfill(4) + ext)
+            self.path.setText(new_path.as_posix())
+
 
 class DagCapture(QtCore.QThread):
     """Thread class for capturing screenshot of Nuke DAG"""
+
     def __init__(
             self,
             dag: QtOpenGL.QGLWidget,
@@ -261,6 +322,7 @@ class DagCapture(QtCore.QThread):
         self.zoom = zoom
         self.successful = False
 
+    # noinspection PyMethodOverriding
     def run(self) -> None:
         """On thread start"""
         # Store the current dag size and zoom
@@ -318,7 +380,6 @@ class DagCapture(QtCore.QThread):
 
 def open_dag_capture() -> None:
     """Opens a blocking dag capture"""
-    logging.info("Opening dag capture window")
     dag_capture_panel = DagCapturePanel()
     dag_capture_panel.show()
 
